@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Release Tracker — R31.2 / Sprint 24</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #5e3a96; display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+    #__bundler_loading { position: fixed; bottom: 20px; right: 20px; font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; color: #666; background: #fff; padding: 8px 14px; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.12); z-index: 10000; }
+    #__bundler_thumbnail { position: fixed; inset: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: #5e3a96; z-index: 9999; }
+    #__bundler_thumbnail svg { width: 100%; height: 100%; object-fit: contain; }
+    #__bundler_placeholder { color: #999; font-size: 14px; }
+  </style>
+  <noscript>
+    <style>#__bundler_loading { display: none; }</style>
+    <div style="position:fixed;bottom:12px;left:12px;font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;color:#999;background:rgba(255,255,255,0.9);padding:6px 12px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,0.08);z-index:10000;">
+      This page requires JavaScript to display.
+    </div>
+  </noscript>
+</head>
+<body>
+  <div id="__bundler_thumbnail">
+  <svg viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg">
+    <rect x="80" y="120" width="1040" height="100" fill="#ffffff" opacity="0.95"></rect>
+    <rect x="80" y="240" width="1040" height="80" fill="#FFFF00"></rect>
+    <rect x="80" y="340" width="1040" height="80" fill="#92D050"></rect>
+    <rect x="80" y="440" width="1040" height="80" fill="#FFFF00"></rect>
+    <rect x="80" y="540" width="1040" height="80" fill="#ffffff" opacity="0.9"></rect>
+    <rect x="80" y="640" width="1040" height="80" fill="#92D050"></rect>
+  </svg>
+</div>
+  <div id="__bundler_loading">Unpacking...</div>
+
+  <script>
+    
+document.addEventListener('DOMContentLoaded', async function() {
+  const loading = document.getElementById('__bundler_loading');
+  function setStatus(msg) { if (loading) loading.textContent = msg; }
+
+  // Error sink persists across replaceWith since it's on window, not the DOM.
+  window.addEventListener('error', function(e) {
+    var p = document.body || document.documentElement;
+    var d = document.getElementById('__bundler_err') || p.appendChild(document.createElement('div'));
+    d.id = '__bundler_err';
+    d.style.cssText = 'position:fixed;bottom:12px;left:12px;right:12px;font:12px/1.4 ui-monospace,monospace;background:#2a1215;color:#ff8a80;padding:10px 14px;border-radius:8px;border:1px solid #5c2b2e;z-index:99999;white-space:pre-wrap;max-height:40vh;overflow:auto';
+    d.textContent = (d.textContent ? d.textContent + String.fromCharCode(10) : '') +
+      '[bundle] ' + (e.message || e.type) +
+      (e.filename ? ' (' + e.filename.slice(0, 60) + ':' + e.lineno + ')' : '');
+  }, true);
+
+  try {
+    const manifestEl = document.querySelector('script[type="__bundler/manifest"]');
+    const templateEl = document.querySelector('script[type="__bundler/template"]');
+    if (!manifestEl || !templateEl) {
+      setStatus('Error: missing bundle data');
+      console.error('[bundler] Missing script tags — manifestEl:', !!manifestEl, 'templateEl:', !!templateEl);
+      return;
+    }
+
+    const manifest = JSON.parse(manifestEl.textContent);
+    let template = JSON.parse(templateEl.textContent);
+
+    const uuids = Object.keys(manifest);
+    setStatus('Unpacking ' + uuids.length + ' assets...');
+
+    const blobUrls = {};
+    await Promise.all(uuids.map(async (uuid) => {
+      const entry = manifest[uuid];
+      try {
+        const binaryStr = atob(entry.data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+
+        let finalBytes = bytes;
+        if (entry.compressed) {
+          if (typeof DecompressionStream !== 'undefined') {
+            const ds = new DecompressionStream('gzip');
+            const writer = ds.writable.getWriter();
+            const reader = ds.readable.getReader();
+            writer.write(bytes);
+            writer.close();
+            const chunks = [];
+            let totalLen = 0;
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+              totalLen += value.length;
+            }
+            finalBytes = new Uint8Array(totalLen);
+            let offset = 0;
+            for (const chunk of chunks) { finalBytes.set(chunk, offset); offset += chunk.length; }
+          } else {
+            console.warn('DecompressionStream not available, asset ' + uuid + ' may not render');
+          }
+        }
+
+        blobUrls[uuid] = URL.createObjectURL(new Blob([finalBytes], { type: entry.mime }));
+      } catch (err) {
+        console.error('Failed to decode asset ' + uuid + ':', err);
+        blobUrls[uuid] = URL.createObjectURL(new Blob([], { type: entry.mime }));
+      }
+    }));
+
+    const extResEl = document.querySelector('script[type="__bundler/ext_resources"]');
+    const extResources = extResEl ? JSON.parse(extResEl.textContent) : [];
+    const resourceMap = {};
+    for (const entry of extResources) {
+      if (blobUrls[entry.uuid]) resourceMap[entry.id] = blobUrls[entry.uuid];
+    }
+
+    setStatus('Rendering...');
+    for (const uuid of uuids) template = template.split(uuid).join(blobUrls[uuid]);
+
+    // Strip integrity + crossorigin — blob URLs from a file:// document inherit
+    // a null origin, so crossorigin forces a CORS fetch that SRI then rejects.
+    // The manifest bytes are ours; SRI protects against CDN compromise, not this.
+    template = template.replace(/\s+integrity="[^"]*"/gi, '').replace(/\s+crossorigin="[^"]*"/gi, '');
+
+    const resourceScript = '<script>window.__resources = ' +
+      JSON.stringify(resourceMap).split('</' + 'script>').join('<\\/' + 'script>') +
+      ';</' + 'script>';
+    // Inject after <head> so the DOCTYPE stays first; prepending the script
+    // would push the parser into quirks mode. DOMParser always emits a <head>
+    // (synthesizing one if the source HTML omitted it) but may carry
+    // attributes through, so match the full opening tag. slice() rather than
+    // replace() keeps us clear of $-pattern substitution in resourceScript.
+    const headOpen = template.match(/<head[^>]*>/i);
+    if (headOpen) {
+      const i = headOpen.index + headOpen[0].length;
+      template = template.slice(0, i) + resourceScript + template.slice(i);
+    }
+
+    // Parse the template and swap the root element. Scripts inserted via
+    // DOMParser/replaceWith are inert per spec — re-create each with
+    // createElement so they execute, awaiting onload for src scripts to
+    // preserve ordering (React before ReactDOM before Babel before text/babel).
+    const doc = new DOMParser().parseFromString(template, 'text/html');
+    document.documentElement.replaceWith(doc.documentElement);
+    const dead = Array.from(document.scripts);
+    for (const old of dead) {
+      const s = document.createElement('script');
+      for (const a of old.attributes) s.setAttribute(a.name, a.value);
+      s.textContent = old.textContent;
+      // text/babel scripts with a src: fetch and inline. transformScriptTags
+      // does XHR against the src, but blob:null/ from a file:// origin is
+      // silently dropped. Inlining makes it a plain inline babel script,
+      // which transformScriptTags handles unconditionally.
+      if ((s.type === 'text/babel' || s.type === 'text/jsx') && s.src) {
+        const r = await fetch(s.src);
+        s.textContent = await r.text();
+        s.removeAttribute('src');
+      }
+      const p = s.src ? new Promise(function(r) { s.onload = s.onerror = r; }) : null;
+      old.replaceWith(s);
+      if (p) await p;
+    }
+    // Babel standalone auto-transforms type=text/babel on DOMContentLoaded,
+    // which fired before we swapped the document. Trigger manually if present.
+    if (window.Babel && typeof window.Babel.transformScriptTags === 'function') {
+      window.Babel.transformScriptTags();
+    }
+  } catch (err) {
+    setStatus('Error unpacking: ' + err.message);
+    console.error('Bundle unpack error:', err);
+  }
+});
+
+  </script>
+
+  <script type="__bundler/manifest">
+{}
+  </script>
+
+  <script type="__bundler/ext_resources">
+[]
+  </script>
+
+  <script type="__bundler/template">
+"<!DOCTYPE html>\n<html lang=\"en\"><head>\n<meta charset=\"UTF-8\">\n<title>Release Tracker — R31.2 / Sprint 24<\u002Ftitle>\n<style>\n  :root {\n    --header-bg: #5e3a96;        /* Excel purple header */\n    --header-text: #ffffff;\n    --grid: #d4d4d4;\n    --row-alt: #ffffff;\n    --yellow-bg: #fff7c2;        /* pale yellow fill */\n    --yellow-text: #ffc000;      /* Excel gold text */\n    --link: #0563c1;\n  }\n  html, body {\n    margin: 0;\n    padding: 0;\n    background: #f3f3f3;\n    font-family: Calibri, \"Segoe UI\", Arial, sans-serif;\n    color: #000;\n  }\n  .sheet {\n    background: #fff;\n    width: 1600px;\n    margin: 0 auto;\n    padding: 0;\n  }\n  table.grid {\n    border-collapse: collapse;\n    width: 100%;\n    table-layout: fixed;\n    font-size: 12.5px;\n    line-height: 1.25;\n  }\n  table.grid td,\n  table.grid th {\n    border: 1px solid var(--grid);\n    padding: 4px 6px;\n    vertical-align: middle;\n    word-wrap: break-word;\n    overflow-wrap: break-word;\n  }\n  /* Column widths to match the original layout */\n  col.c-release   { width: 70px; }\n  col.c-sprint    { width: 70px; }\n  col.c-area      { width: 165px; }\n  col.c-offering  { width: 170px; }\n  col.c-lead      { width: 165px; }\n  col.c-resp      { width: 200px; }\n  col.c-scope     { width: 480px; }\n  col.c-tfs       { width: 70px; }\n  col.c-type      { width: 110px; }\n  col.c-same      { width: 130px; }\n\n  /* Header */\n  thead th {\n    background: var(--header-bg);\n    color: var(--header-text);\n    font-weight: 700;\n    text-align: center;\n    padding: 10px 22px 10px 6px;\n    position: relative;\n    border: 1px solid #4a2f78;\n    font-size: 12.5px;\n    letter-spacing: .2px;\n  }\n  thead th .filter {\n    position: absolute;\n    right: 4px;\n    top: 50%;\n    transform: translateY(-50%);\n    width: 14px;\n    height: 14px;\n    background: #ffffff;\n    border: 1px solid #b9b9b9;\n    border-radius: 1px;\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    color: #2c2c2c;\n    font-size: 9px;\n    line-height: 1;\n  }\n  thead th .filter::before {\n    content: \"▼\";\n    font-size: 8px;\n  }\n\n  /* Body cells */\n  tbody td {\n    background: #ffffff;\n    color: #000;\n    text-align: left;\n  }\n  td.center { text-align: center; }\n  td.scope { color: #000; }\n  td.scope.sf   { background: #FFFF00; }\n  td.scope.test { background: #92D050; }\n  td.scope.dc   { background: #ffffff; }\n  td.tfs {\n    text-align: center;\n    color: var(--link);\n    text-decoration: underline;\n  }\n  td.same { color: #000; }\n\n  /* match the slightly squashed two-line wraps from the source */\n  td.area, td.offering, td.lead, td.resp {\n    white-space: normal;\n  }\n<\u002Fstyle>\n\n<\u002Fhead>\n<body>\n  <div class=\"sheet\">\n    <table class=\"grid\" role=\"table\" aria-label=\"Release scope tracker\">\n      <colgroup>\n        <col class=\"c-release\">\n        <col class=\"c-sprint\">\n        <col class=\"c-area\">\n        <col class=\"c-offering\">\n        <col class=\"c-lead\">\n        <col class=\"c-resp\">\n        <col class=\"c-scope\">\n        <col class=\"c-tfs\">\n        <col class=\"c-type\">\n        <col class=\"c-same\">\n      <\u002Fcolgroup>\n      <thead>\n        <tr>\n          <th>RELEASE<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>SPRINT<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>AREA<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>Offering Areas<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>Offering Lead or SME<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>Sales Excellence / Application Architecture Responsible<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>RELEASE SCOPE ITEM<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>TFS<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>Type<span class=\"filter\"><\u002Fspan><\u002Fth>\n          <th>Same As<span class=\"filter\"><\u002Fspan><\u002Fth>\n        <\u002Ftr>\n      <\u002Fthead>\n      <tbody>\n        <!-- Row 1 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Contact Lifecycle Management<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Carlos Vega<\u002Ftd>\n          <td class=\"scope sf\">[SF] Contact Access Lifecycle – Implement Case Creation Flow and Email Notification<\u002Ftd>\n          <td class=\"tfs\">2043871<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 2 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Contact Lifecycle Management<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Carlos Vega<\u002Ftd>\n          <td class=\"scope test\">[Test] Contact Access Lifecycle – Implement Case Creation Flow and Email Notification<\u002Ftd>\n          <td class=\"tfs\">2043879<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 2043871<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 3 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Contact Lifecycle Management<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Carlos Vega<\u002Ftd>\n          <td class=\"scope test\">[Test] Contact Access Lifecycle – Develop ‘Extend’ Button to Update Expiration Date<\u002Ftd>\n          <td class=\"tfs\">2043892<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 1786185<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 4 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Contact Lifecycle Management<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Carlos Vega<\u002Ftd>\n          <td class=\"scope sf\">[SF] Contact Access Lifecycle – Create Flow to Remove ATR when access is expired<\u002Ftd>\n          <td class=\"tfs\">2043905<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 5 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Marketing<\u002Ftd>\n          <td class=\"offering\">Marketing<\u002Ftd>\n          <td class=\"lead\">Sarah Mitchell<\u002Ftd>\n          <td class=\"resp\">Sarah Mitchell<\u002Ftd>\n          <td class=\"scope sf\">[SF] Auto-populate Campaign field on Activities when Related To is an Event Campaign<\u002Ftd>\n          <td class=\"tfs\">2061438<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 6 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Marketing<\u002Ftd>\n          <td class=\"offering\">Marketing<\u002Ftd>\n          <td class=\"lead\">Sarah Mitchell<\u002Ftd>\n          <td class=\"resp\">Sarah Mitchell<\u002Ftd>\n          <td class=\"scope test\">[TEST] Auto-populate Campaign field on Activities when Related To is an Event Campaign<\u002Ftd>\n          <td class=\"tfs\">2142897<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 2061438<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 7 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Contact Lifecycle Management<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Carlos Vega<\u002Ftd>\n          <td class=\"scope test\">[TEST] Contact Access Lifecycle – Create Flow to Remove ATR when access is expired<\u002Ftd>\n          <td class=\"tfs\">2043911<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 2043905<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 8 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Account Plan<\u002Ftd>\n          <td class=\"offering\">Account Planning &amp; Organization<\u002Ftd>\n          <td class=\"lead\">Emma Ferraro<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope sf\">[SF] Account Plan - Name is not Updated on Account Name Update<\u002Ftd>\n          <td class=\"tfs\">1978234<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 9 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Account Plan<\u002Ftd>\n          <td class=\"offering\">Account Planning &amp; Organization<\u002Ftd>\n          <td class=\"lead\">Emma Ferraro<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope test\">[TEST] Account Plan - Name is not Updated on Account Name Update<\u002Ftd>\n          <td class=\"tfs\">1978241<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 1978234<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 10 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Account Plan<\u002Ftd>\n          <td class=\"offering\">Account Planning &amp; Organization<\u002Ftd>\n          <td class=\"lead\">Emma Ferraro<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope sf\">[SF] Account Plan - FY26 - Update Messages<\u002Ftd>\n          <td class=\"tfs\">2118564<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 11 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Account Plan<\u002Ftd>\n          <td class=\"offering\">Account Planning &amp; Organization<\u002Ftd>\n          <td class=\"lead\">Emma Ferraro<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope test\">[TEST] Account Plan - FY26 - Update Messages<\u002Ftd>\n          <td class=\"tfs\">2118571<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 2118564<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 12 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Accounts<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope sf\">[SF] Account Core - CRM - Email Notification Template - Part 1<\u002Ftd>\n          <td class=\"tfs\">1961083<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 13 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Accounts<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope sf\">[SF] Account - Horizon UI - New Lightning Design Framework - Home Components<\u002Ftd>\n          <td class=\"tfs\">2111437<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 14 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Opportunity - Pipeline<\u002Ftd>\n          <td class=\"offering\">Qualification, Win Strategy &amp; Approvals<\u002Ftd>\n          <td class=\"lead\">David Kowalski<\u002Ftd>\n          <td class=\"resp\">James Park<\u002Ftd>\n          <td class=\"scope test\">[Test] Pipeline – Update structure for new LATAM MU values<\u002Ftd>\n          <td class=\"tfs\">1945228<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 1945228<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 15 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Opportunity - Pipeline<\u002Ftd>\n          <td class=\"offering\">Qualification, Win Strategy &amp; Approvals<\u002Ftd>\n          <td class=\"lead\">David Kowalski<\u002Ftd>\n          <td class=\"resp\">James Park<\u002Ftd>\n          <td class=\"scope dc\">[DC] Pipeline – Update structure for new LATAM MU values<\u002Ftd>\n          <td class=\"tfs\">2139682<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 16 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Pricing Support<\u002Ftd>\n          <td class=\"offering\">Profitable Selling<\u002Ftd>\n          <td class=\"lead\">Claire Thompson<\u002Ftd>\n          <td class=\"resp\">Ryan Callahan<\u002Ftd>\n          <td class=\"scope sf\">[SF] Revenue Intelligence/Market Tracking access request: Restrictions on reassigning requests between queues<\u002Ftd>\n          <td class=\"tfs\">2123549<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 17 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Pricing Support<\u002Ftd>\n          <td class=\"offering\">Profitable Selling<\u002Ftd>\n          <td class=\"lead\">Claire Thompson<\u002Ftd>\n          <td class=\"resp\">Ryan Callahan<\u002Ftd>\n          <td class=\"scope test\">[TEST] Revenue Intelligence/Market Tracking access request: Restrictions on reassigning requests between queues<\u002Ftd>\n          <td class=\"tfs\">2123556<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 2123549<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 18 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Accounts<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope test\">[TEST] Account - Horizon UI - New Lightning Design Framework - Home Components<\u002Ftd>\n          <td class=\"tfs\">2156834<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\">same as 2111437<\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 19 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Accounts<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope sf\">[SF] Opportunity - Introduce a Regional Account Lead (RAL) role on Sales Team Page - Part 1<\u002Ftd>\n          <td class=\"tfs\">2149327<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n        <!-- Row 20 -->\n        <tr>\n          <td class=\"center\">R31.2<\u002Ftd>\n          <td class=\"center\">24<\u002Ftd>\n          <td class=\"area\">Accounts<\u002Ftd>\n          <td class=\"offering\">Revenue Operations<\u002Ftd>\n          <td class=\"lead\">Arjun Mehta<\u002Ftd>\n          <td class=\"resp\">Laura Chen<\u002Ftd>\n          <td class=\"scope sf\">[SF] Account Core - CRM - Email Notification Template - Part 2<\u002Ftd>\n          <td class=\"tfs\">2157641<\u002Ftd>\n          <td>Enhancement<\u002Ftd>\n          <td class=\"same\"><\u002Ftd>\n        <\u002Ftr>\n      <\u002Ftbody>\n    <\u002Ftable>\n  <\u002Fdiv>\n\n\n<\u002Fbody><\u002Fhtml>"
+  </script>
+</body>
+</html>
